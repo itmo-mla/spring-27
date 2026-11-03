@@ -37,8 +37,24 @@ class HygieneTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertIsNotNone(garbage("students/a/lab1/"+path))
         for path in ["README.md", "sources/main.py", "source/main.py", "plots/result.png",
-                     "metrics.csv", "report.pdf", ".env.example", "requirements.txt"]:
+                     "report.pdf", ".env.example", "requirements.txt", "config.json", "notes.txt"]:
             self.assertIsNone(garbage("students/a/lab1/"+path), path)
+
+    def test_data_formats_are_forbidden_even_when_named_as_results(self):
+        for path in ["train.csv", "results/metrics.csv", "report/data.tsv", "data.parquet",
+                     "features.npy", "arrays.npz", "data.jsonl", "data.xlsx", "data.arff",
+                     "download.tar.gz", "dataset.zip", "snapshot.pkl"]:
+            with self.subTest(path=path):
+                self.assertIn("Файл данных", garbage("students/a/lab1/"+path))
+
+    def test_dataset_deleted_in_later_commit_remains_a_violation(self):
+        path = "students/a/lab1/dataset.csv"
+        self.write(path, "feature,target\n1,0\n")
+        bad_commit = self.commit()
+        (self.root/path).unlink()
+        self.write("students/a/lab1/README.md", "Metrics in report")
+        self.commit()
+        self.assertTrue(any(f.commit == bad_commit and f.path == path for f in self.findings()))
 
     def test_removal_in_later_commit_does_not_fix_history(self):
         path = "students/a/lab1/__pycache__/main.pyc"

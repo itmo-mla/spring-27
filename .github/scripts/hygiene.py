@@ -16,6 +16,10 @@ LAB = re.compile(r"students/[^/]+/lab[0-9]+/")
 CACHE_DIRS = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache",
               ".ipynb_checkpoints", ".tox", ".nox", ".hypothesis", "node_modules"}
 ENV_DIRS = {".venv", "venv", ".env", "site-packages"}
+DATA_SUFFIXES = (".csv", ".tsv", ".parquet", ".feather", ".arrow", ".arff", ".xlsx", ".xls",
+                 ".npy", ".npz", ".h5", ".hdf5", ".mat", ".data", ".dat", ".jsonl", ".ndjson",
+                 ".sqlite", ".sqlite3", ".db", ".pkl", ".pickle", ".joblib",
+                 ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar")
 
 
 @dataclass(frozen=True)
@@ -41,6 +45,8 @@ def garbage(path):
         return "Случайный артефакт команды установки"
     if "/lab1/" in path and name.endswith(".ipynb"):
         return "Для ЛР1 исходники должны быть в .py-файлах"
+    if name.endswith(DATA_SUFFIXES):
+        return "Файл данных или архив. Датасет загружается скриптом, метрики приводятся в отчёте"
     return None
 
 
@@ -94,7 +100,7 @@ def summary(findings, sha):
     if not findings:
         return f"Состав изменений и история PR проверены. Коммит `{sha}`."
     lines = [f"Найдено нарушений: {len(findings)}. Коммит `{sha}`.",
-             "Удаление мусора следующим коммитом не очищает историю PR. Исправьте историю ветки."]
+             "Удаление запрещённых файлов следующим коммитом не очищает историю PR. Исправьте историю ветки."]
     for item in findings[:100]:
         # File names are untrusted Markdown. Render escaped HTML in a code element.
         safe_path = html.escape(item.path).replace("\n", "&#10;").replace("\r", "&#13;")
