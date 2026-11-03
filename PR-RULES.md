@@ -8,7 +8,7 @@
 
 - Кэши `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.cache`, `.ipynb_checkpoints`, `.hypothesis` и файлы `*.pyc`, `*.pyo`.
 - Окружения `.venv`, `venv`, `.env`, каталоги `site-packages`, файлы `pyvenv.cfg`, а также `.tox`, `.nox`, `node_modules` и сгенерированные `*.egg-info`.
-- Временные файлы `*.tmp`, `*.temp`, `*.swp`, `*.swo`, резервные копии с окончанием `~`, `.DS_Store`, `Thumbs.db`, `desktop.ini`, файлы покрытия `.coverage*`.
+- Временные файлы `*.tmp`, `*.temp`, `*.swp`, `*.swo`, резервные копии с окончанием `~`, `.DS_Store`, `Thumbs.db`, `desktop.ini`, файлы покрытия `.coverage` и `.coverage.*`.
 - Локальный `.env` и случайные артефакты команд установки с именем, начинающимся с `=`, например `=4.2.0`.
 
 Для ЛР1 также запрещены `.ipynb`. Отчёт, исходники, необходимые графики и результаты экспериментов разрешены, включая PNG, PDF и CSV с результатами. Каталоги `source` и `sources` допустимы.
