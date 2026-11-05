@@ -9,10 +9,14 @@ import subprocess
 import tempfile
 
 from dispatch import COURSE, INFRA, GitHub, SHA
+from completeness import local_path, report_links
 
 
 CHECK = "Оформление PR"
-LAB = re.compile(r"students/[^/]+/lab[0-9]+/")
+LAB = re.compile(r"students/[^/]+/lab[1-9][0-9]*/")
+REGISTRATION = re.compile(r"students/[^/]+/README\.md\Z")
+KINDS = {"registration": "Регистрация", "lab": "Лабораторная", "cleanup": "Очистка",
+         "invalid": "Недопустимый состав PR"}
 CACHE_DIRS = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache",
               ".ipynb_checkpoints", ".tox", ".nox", ".hypothesis", "node_modules"}
 ENV_DIRS = {".venv", "venv", ".env", "site-packages"}
@@ -27,6 +31,28 @@ class Finding:
     commit: str
     path: str
     reason: str
+    scope: str = "history"
+
+
+@dataclass
+class Inspection:
+    kind: str
+    target: str | None
+    findings: list[Finding]
+
+
+def tree(root, ref):
+    entries = {}
+    for record in git(root, "ls-tree", "-rz", "--long", ref).split(b"\0"):
+        if record:
+            metadata, path = record.split(b"\t", 1)
+            mode, kind, oid, size = metadata.decode("ascii").split()
+            entries[path.decode("utf-8", errors="strict")] = (mode, kind, oid, size)
+    return entries
+
+
+def regular(entry):
+    return entry is not None and entry[0] in ("100644", "100755") and entry[1] == "blob"
 
 
 def garbage(path):
@@ -69,9 +95,31 @@ def changes(data):
 
 def inspect(root, base, head):
     final = changes(git(root, "diff", "--name-status", "--no-renames", "-z", base+"..."+head))
-    lab_roots = {LAB.match(path)[0] for status, path in final if LAB.match(path)
-                 and not (set(status) == {"D"} and garbage(path))}
+    baseline, current = tree(root, base), tree(root, head)
+
+    def cleanup(status, path):
+        return set(status) == {"D"} and garbage(path) is not None and path in baseline
+
+    effective = [(status, path) for status, path in final if not cleanup(status, path)]
+    roots = {LAB.match(path)[0] for _, path in effective if LAB.match(path)}
+    kind, target = "invalid", None
+    if final and not effective:
+        kind = "cleanup"
+    elif len(effective) == 1 and REGISTRATION.fullmatch(effective[0][1]) and effective[0][0] != "D":
+        kind, target = "registration", effective[0][1]
+    elif len(roots) == 1 and all(path.startswith(next(iter(roots))) for _, path in effective):
+        kind, target = "lab", next(iter(roots))
     findings = []
+
+    def allowed(status, path):
+        return (cleanup(status, path) or
+                (kind == "registration" and path == target and set(status) != {"D"}) or
+                (kind == "lab" and path.startswith(target)))
+
+    if kind == "invalid":
+        reason = ("В PR изменения нескольких лабораторных" if len(roots) > 1 else
+                  "PR должен содержать регистрацию, одну лабораторную или только очистку")
+        findings.append(Finding(head, "students/", reason, "current"))
     commits = git(root, "rev-list", "--reverse", head, "--not", base).decode().splitlines()
     for commit in commits:
         # Combined diffs retain merge resolutions that differ from every parent.
@@ -83,31 +131,82 @@ def inspect(root, base, head):
             reason = garbage(path)
             if reason and not deleted:
                 findings.append(Finding(commit, path, reason))
-            if len(lab_roots) == 1 and not path.startswith(next(iter(lab_roots))):
-                if not (deleted and reason):
-                    findings.append(Finding(commit, path, "Изменение вне текущей лабораторной"))
-    if len(lab_roots) > 1:
-        findings.append(Finding(head, "students/", "В PR изменения нескольких лабораторных"))
+            if not allowed(status, path):
+                findings.append(Finding(commit, path, "Изменение вне допустимого состава PR"))
     # A final diff also covers unusual merge ancestry and makes the final state explicit.
     for status, path in final:
         reason = garbage(path)
         if reason and set(status) != {"D"} and not any(f.path == path for f in findings):
             findings.append(Finding(head, path, reason))
-    return findings
+        if not allowed(status, path) and not any(f.path == path and "состава PR" in f.reason for f in findings):
+            findings.append(Finding(head, path, "Изменение вне допустимого состава PR"))
+
+    def read_required(path, nonempty=True):
+        entry = current.get(path)
+        if not regular(entry):
+            findings.append(Finding(head, path, "Отсутствует обязательный обычный файл", "current"))
+            return None
+        # The grading snapshot has the same per-file bound. Do not read huge blobs.
+        if int(entry[3]) > 5 * 1024 * 1024:
+            findings.append(Finding(head, path, "Файл превышает лимит 5 МиБ", "current"))
+            return None
+        data = git(root, "cat-file", "blob", entry[2])
+        if nonempty and not data.strip():
+            findings.append(Finding(head, path, "Обязательный файл пуст", "current"))
+            return None
+        return data
+
+    if kind == "registration":
+        read_required(target)
+    elif kind == "lab":
+        report = target + "README.md"
+        data = read_required(report)
+        read_required(target + "requirements.txt", nonempty=False)
+        if target.endswith("/lab1/"):
+            read_required(target + "adapter.py")
+        if data is not None:
+            try:
+                addresses = report_links(data.decode("utf-8-sig"))
+            except UnicodeError:
+                findings.append(Finding(head, report, "README должен быть в UTF-8", "current"))
+            else:
+                for address in sorted(addresses):
+                    try:
+                        destination = local_path(report, address)
+                    except ValueError:
+                        findings.append(Finding(head, report, "Недопустимая локальная ссылка: " + address, "current"))
+                        continue
+                    if destination is not None and not regular(current.get(destination)):
+                        # Git directory links are valid navigation links too.
+                        if destination in (".", "") or any(p.startswith(destination.rstrip("/") + "/") for p in current):
+                            continue
+                        findings.append(Finding(head, report, "Нет локального файла по ссылке: " + address, "current"))
+    return Inspection(kind, target, findings)
 
 
-def summary(findings, sha):
+def summary(result, sha):
+    findings = result.findings
+    prefix = f"Тип PR: {KINDS[result.kind]}. Коммит `{sha}`."
     if not findings:
-        return f"Состав изменений и история PR проверены. Коммит `{sha}`."
-    lines = [f"Найдено нарушений: {len(findings)}. Коммит `{sha}`.",
-             "Удаление запрещённых файлов следующим коммитом не очищает историю PR. Исправьте историю ветки."]
+        return prefix + " Состав изменений, история и комплектность проверены."
+    lines = [prefix, f"Найдено нарушений: {len(findings)}."]
+    if any(f.scope == "history" for f in findings):
+        lines.append("Нарушения истории требуют исправления коммитов: последующее удаление или восстановление файла их не устраняет.")
+    if any(f.scope == "current" for f in findings):
+        lines.append("Нарушения текущих файлов можно исправить следующим коммитом.")
+    shown = 0
     for item in findings[:100]:
         # File names are untrusted Markdown. Render escaped HTML in a code element.
-        safe_path = html.escape(item.path).replace("\n", "&#10;").replace("\r", "&#13;")
-        lines.append(f"- {item.reason}. <code>{safe_path}</code>, "
-                     f"[коммит {item.commit[:7]}](https://github.com/{COURSE}/commit/{item.commit})")
-    if len(findings) > 100:
-        lines.append("Показаны первые 100 нарушений.")
+        safe_path = html.escape(item.path[:400]).replace("\n", "&#10;").replace("\r", "&#13;")
+        safe_reason = html.escape(item.reason[:600]).replace("\n", "&#10;").replace("\r", "&#13;")
+        line = (f"- <code>{safe_reason}</code>. <code>{safe_path}</code>, "
+                f"[коммит {item.commit[:7]}](https://github.com/{COURSE}/commit/{item.commit})")
+        if sum(map(len, lines)) + len(line) > 50000:
+            break
+        lines.append(line)
+        shown += 1
+    if len(findings) > shown:
+        lines.append(f"Показаны первые {shown} нарушений.")
     return "\n\n".join(lines)
 
 
@@ -131,8 +230,8 @@ def run(api, pr_number, expected_sha):
             if actual != head:
                 conclusion, text = "cancelled", "PR обновился во время получения истории."
             else:
-                findings = inspect(temporary, base, head)
-                conclusion, text = ("failure" if findings else "success"), summary(findings, head)
+                result = inspect(temporary, base, head)
+                conclusion, text = ("failure" if result.findings else "success"), summary(result, head)
     finally:
         api.request("PATCH", f"/repos/{COURSE}/check-runs/{check['id']}", {
             "status": "completed", "conclusion": conclusion,
